@@ -125,13 +125,15 @@ export class ConnectionViewer extends WebViewPanelBase implements vscode.Webview
             profileProviders,
             profiles,
             connections,
-            dictionaries
         ] = await Promise.all([
             this.api.allProviders(),
             this.api.allProfiles(),
             this.api.allFsw(),
-            this.api.allDictionaries(),
         ]);
+
+        // We read the dictionaries last, right before posting. While we wait on the lookups above, our
+        // onDictionaryChange listener can post a newer list, and a list read earlier would replace it.
+        const dictionaries = await this.api.allDictionaries();
 
         this.msg?.postMessage({
             dictionaryProviders: this.getDictionaryProvider(),
