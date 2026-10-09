@@ -2,10 +2,11 @@ import * as vscode from 'vscode';
 
 import * as Hermes from '@gov.nasa.jpl.hermes/api';
 import * as Rpc from '@gov.nasa.jpl.hermes/rpc';
+import type { CommandValue } from '@gov.nasa.jpl.hermes/sequence';
 import { BackendProvider, Settings } from '@gov.nasa.jpl.hermes/vscode';
 
 import { Offline } from './Offline';
-import { yamcsDictionary } from './yamcsCommands';
+import { commandSent, yamcsArguments, yamcsDictionary } from './yamcsCommands';
 
 export type YamcsParameterHandler = (instance: string, values: Rpc.YamcsParameterValue[]) => void;
 
@@ -43,9 +44,10 @@ export function inTopLevelSpaceSystem(qualifiedName: string): boolean {
     return qualifiedName.split('/').length === 3;
 }
 
-// Telemetry and events straight from YAMCS through the yamcs-grpc plugin, named by YAMCS, so they
-// don't need a Hermes dictionary. Everything else behaves as in Offline mode, which has no flight
-// software connection and so no commands.
+// Telemetry and events straight from YAMCS, and commands to it, through the yamcs-grpc plugin.
+// Telemetry and events are named by YAMCS, so they don't need a Hermes dictionary. Commands go
+// through our one flight software connection, using a dictionary built from YAMCS's mission
+// database. Everything else behaves as in Offline mode.
 export class Yamcs extends Offline implements YamcsParameterSource, YamcsEventSource {
     private readonly parameters = new vscode.EventEmitter<Rpc.YamcsParameterValue[]>();
     // Handlers share one YAMCS subscription, opened for the first handler and cancelled when the last one is disposed
@@ -59,14 +61,27 @@ export class Yamcs extends Offline implements YamcsParameterSource, YamcsEventSo
     // Losing YAMCS ends the parameter and event subscriptions together, so we only exit the backend for the first one
     private exited = false;
 
+    private readonly fsw: Hermes.Fsw;
+    // YAMCS puts this in each command's id, so commands issued in the same millisecond get different ids
+    private sequenceNumber = 0;
+
     constructor(
         context: vscode.ExtensionContext,
         log: Hermes.Log,
         readonly client: Rpc.YamcsClient,
         readonly state: Settings.Yamcs,
         readonly names: readonly string[],
+        dictionaryId: string,
     ) {
         super(context, log);
+        this.fsw = {
+            id: `yamcs:${state.instance}`,
+            type: 'yamcs',
+            profileId: '',
+            dictionary: dictionaryId,
+            command: (value, token) => this.command(value, token),
+            sequence: (value, token) => this.sequence(value, token),
+        };
     }
 
     /**
@@ -98,7 +113,7 @@ export class Yamcs extends Offline implements YamcsParameterSource, YamcsEventSo
             log.info(`Found ${commands.length} commands in YAMCS instance ${state.instance}`);
             const dictionary = yamcsDictionary(state.instance, commands);
 
-            const api = new Yamcs(context, log, client, state, names);
+            const api = new Yamcs(context, log, client, state, names, dictionary.id!);
             await api._activate();
             // This dictionary has to stay in memory, because a saved copy reloads its missing opcodes as 0. It has
             // an id, so addDictionary doesn't save it to workspace storage.
@@ -186,6 +201,69 @@ export class Yamcs extends Offline implements YamcsParameterSource, YamcsEventSo
         }
     }
 
+    async allFsw(): Promise<Hermes.Fsw[]> {
+        return [this.fsw];
+    }
+
+    async getFsw(id: string): Promise<Hermes.Fsw> {
+        return id === this.fsw.id ? this.fsw : super.getFsw(id);
+    }
+
+    // We call each listener with our one flight software connection as soon as it subscribes. The
+    // connection never changes, so a listener would never hear of it otherwise.
+    onFswChange: vscode.Event<Hermes.Fsw[]> = (listener) => {
+        listener([this.fsw]);
+        return { dispose: () => { } };
+    };
+
+    /**
+     * Issues a command on state.processor by the qualified name in its metadata, then
+     * checks its history every 50 ms and resolves once YAMCS has sent it. We poll because
+     * SubscribeCommands streams every command on the processor, with no way to ask for
+     * one. We don't wait for the flight software to run it, since YAMCS learns that only
+     * from verifiers, which a mission database may not define.
+     *
+     * grpc-js can leave a call waiting for minutes on a dead connection, so we make each
+     * wait cancellable to let the user stop the cell.
+     */
+    private async command(value: CommandValue, token?: vscode.CancellationToken): Promise<boolean> {
+        const name = value.def.metadata?.qualifiedName;
+        if (!name) {
+            throw new Error(`${value.def.component}.${value.def.mnemonic} has no YAMCS qualified name. Select a dictionary built from YAMCS as this cell language's dictionary.`);
+        }
+
+        // We check for a stopped cell before issuing. Calling issueCommand sends the request at once,
+        // and cancellable only stops us waiting.
+        if (token?.isCancellationRequested) {
+            throw new Error('Cancelled');
+        }
+        const issued = this.client.issueCommand(this.state.instance, this.state.processor, name, yamcsArguments(value), this.sequenceNumber++);
+        try {
+            const id = await cancellable(issued, token).catch((err) => {
+                // grpc-js puts YAMCS's reason in details, without the status code in front
+                throw new Error(`Could not issue ${name}: ${err.details ?? err.message}`, { cause: err });
+            });
+            while (!commandSent(await cancellable(this.client.getCommand(this.state.instance, id), token))) {
+                await cancellable(delay(50), token);
+            }
+        } catch (err) {
+            if (token?.isCancellationRequested) {
+                // Stopping the cell doesn't take the command back from YAMCS, where it may wait in a blocked queue
+                throw new Error(`Cancelled before Hermes saw YAMCS send ${name}. YAMCS may already have sent it, or may send it later.`, { cause: err });
+            }
+            throw err;
+        }
+        return true;
+    }
+
+    // Issues a cell's commands one at a time, each once YAMCS has sent the one before
+    private async sequence(value: Hermes.CommandSequence, token?: vscode.CancellationToken): Promise<boolean> {
+        for (const cmd of value.commands) {
+            await this.command(cmd, token);
+        }
+        return true;
+    }
+
     dispose(): void {
         this.cancel?.();
         this.parameters.dispose();
@@ -243,6 +321,10 @@ export class YamcsBackendProvider implements BackendProvider<Settings.Yamcs> {
         // Leave the tooltip alone, since VscodeApi.invalidate already put the error there
         showServer(item, state);
     }
+}
+
+function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // Waits for promise, but rejects as soon as token is cancelled

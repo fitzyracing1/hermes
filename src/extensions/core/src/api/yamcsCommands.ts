@@ -1,5 +1,8 @@
+import Long from 'long';
+
 import type * as Rpc from '@gov.nasa.jpl.hermes/rpc';
-import { Def, Dictionary, DualKeyMap, Proto } from '@gov.nasa.jpl.hermes/types';
+import type { CommandValue } from '@gov.nasa.jpl.hermes/sequence';
+import { Def, Dictionary, DualKeyMap, Proto, Value } from '@gov.nasa.jpl.hermes/types';
 
 /**
  * A Hermes dictionary of instance's commands. Each command is keyed by its YAMCS
@@ -119,4 +122,64 @@ function integerType(type: Rpc.YamcsArgumentTypeInfo): Def.NumberType {
         out.max = Math.min(highest, type.rangeMax ?? Infinity);
     }
     return out;
+}
+
+/**
+ * The arguments of cmd as IssueCommand takes them, keyed by argument name
+ */
+export function yamcsArguments(cmd: CommandValue): Record<string, Rpc.YamcsArgumentValue> {
+    return Object.fromEntries(cmd.def.arguments.map((arg, i) => [arg.name, argumentValue(cmd.args[i])]));
+}
+
+/**
+ * Converts an argument value from a notebook cell into the protobuf Value that
+ * YAMCS reads arguments from.
+ */
+export function argumentValue(value: Value): Rpc.YamcsArgumentValue {
+    if (typeof value === 'string') {
+        return { stringValue: value };
+    } else if (typeof value === 'number') {
+        return { numberValue: value };
+    } else if (typeof value === 'boolean') {
+        return { boolValue: value };
+    } else if (Long.isLong(value) || typeof value === 'bigint') {
+        // A protobuf Value holds numbers as doubles, which can't hold every 64-bit integer, so we send one
+        // as text, which YAMCS parses. A bigint here is an element of a BigInt64Array or BigUint64Array.
+        return { stringValue: value.toString() };
+    } else if (Array.isArray(value) || ArrayBuffer.isView(value)) {
+        return { listValue: { values: Array.from(value as ArrayLike<Value>, argumentValue) } };
+    } else {
+        return {
+            structValue: {
+                fields: Object.fromEntries(Object.entries(value).map(([name, member]) => [name, argumentValue(member)])),
+            },
+        };
+    }
+}
+
+const failedStatuses = ['NOK', 'TIMEOUT', 'CANCELLED'];
+
+/**
+ * Whether YAMCS has sent the command in entry. YAMCS records each step of sending
+ * a command in its history as <step>_Status, for example Acknowledge_Queued_Status,
+ * and why a step failed as <step>_Message. We return true once Acknowledge_Sent_Status
+ * is OK, false while YAMCS is still working on it, and throw YAMCS's reason if a step
+ * failed first.
+ *
+ * We check for sent first, because YAMCS can record a failure status afterwards, such
+ * as CANCELLED for a verifier it stops waiting on.
+ */
+export function commandSent(entry: Rpc.YamcsCommandHistoryEntry): boolean {
+    const attributes = new Map((entry.attr ?? []).map((a) => [a.name, a.value?.stringValue]));
+    if (attributes.get('Acknowledge_Sent_Status') === 'OK') {
+        return true;
+    }
+    for (const [name, status] of attributes) {
+        if (name?.endsWith('_Status') && status && failedStatuses.includes(status)) {
+            const step = name.slice(0, -'_Status'.length);
+            const reason = attributes.get(`${step}_Message`);
+            throw new Error(`YAMCS did not send ${entry.commandName}: ${step} ${status}${reason ? `, ${reason}` : ''}`);
+        }
+    }
+    return false;
 }
