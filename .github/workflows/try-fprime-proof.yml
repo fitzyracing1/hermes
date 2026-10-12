@@ -1,0 +1,19 @@
+# Fork-only proof workflow (not part of the PR)
+name: try F Prime cache + integration
+on:
+  push:
+    branches: ['try/**']
+permissions:
+  contents: read
+  packages: write
+jobs:
+  build:
+    uses: ./.github/workflows/template-build-fprime.yml
+    with:
+      tag: nightly
+      fprime-branch: devel
+  integration:
+    needs: build
+    uses: ./.github/workflows/template-test-integration.yml
+    with:
+      fprime-tag: nightly
