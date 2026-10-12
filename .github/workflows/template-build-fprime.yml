@@ -43,7 +43,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.fprime
-          push: true
+          push: ${{ github.repository == 'nasa/hermes' }}  # throwaway: fork GITHUB_TOKEN cannot create ghcr packages
           tags: |
             ghcr.io/${{ github.repository }}/fprime-ref:${{ inputs.tag }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository }}/fprime-ref:${{ inputs.tag }}
