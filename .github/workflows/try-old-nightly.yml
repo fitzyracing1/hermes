@@ -1,0 +1,17 @@
+# Fork-only check (not part of any PR): fix alone vs upstream's current images
+name: try fix vs current nightly
+on:
+  push:
+    branches: ['try/**']
+permissions:
+  contents: read
+  packages: read
+jobs:
+  nightly:
+    uses: ./.github/workflows/template-test-integration.yml
+    with:
+      fprime-tag: nightly
+  v4_1_1:
+    uses: ./.github/workflows/template-test-integration.yml
+    with:
+      fprime-tag: v4.1.1

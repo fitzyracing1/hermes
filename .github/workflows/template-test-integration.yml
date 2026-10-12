@@ -11,7 +11,7 @@ jobs:
   integration-test:
     runs-on: ubuntu-latest
     env:
-      FPRIME_IMAGE: ghcr.io/${{ github.repository }}/fprime-ref:${{ inputs.fprime-tag }}
+      FPRIME_IMAGE: ghcr.io/nasa/hermes/fprime-ref:${{ inputs.fprime-tag }}
 
     steps:
       - name: Set up Docker Compose
