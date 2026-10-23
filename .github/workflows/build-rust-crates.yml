@@ -17,6 +17,9 @@ on:
       - '.github/workflows/build-rust-crates.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Test Rust Crates
