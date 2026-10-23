@@ -8,6 +8,10 @@ on:
       - 'zensical.toml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   nightly:
     uses: ./.github/workflows/template-test-integration.yml

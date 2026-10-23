@@ -10,6 +10,9 @@ on:
 # `pull requests: read and write`
 # `workflows: read and write`
 
+permissions:
+  contents: read
+
 jobs:
   release:
     runs-on: ubuntu-latest

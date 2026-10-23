@@ -71,3 +71,8 @@ updates:
     commit-message:
       prefix: 'chore'
       include: 'scope'
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
